@@ -355,15 +355,17 @@ def score_against_reference(
     s_stats = corr_score(cand_stats, ref["stats"])
     s_stats_l = corr_score(cand_stats_l, ref["stats_l"])
     s_stats_r = corr_score(cand_stats_r, ref["stats_r"])
+    s_color = hist_score(cand_img, ref["color"])
 
     # เน้นเลขขอบ + ชื่อ + ค่าล่าง
     final = (
-        (s_strip * 0.35)
-        + (s_title * 0.25)
-        + (s_stats * 0.15)
-        + (s_stats_l * 0.05)
-        + (s_stats_r * 0.05)
-        + (s_global * 0.15)
+        (s_strip * 0.28)
+        + (s_title * 0.20)
+        + (s_stats * 0.22)
+        + (s_stats_l * 0.08)
+        + (s_stats_r * 0.08)
+        + (s_global * 0.08)
+        + (s_color * 0.06)
     )
     return float(final)
 
@@ -435,7 +437,7 @@ def predict_card(candidate_raw: np.ndarray) -> dict[str, Any]:
         coarse_scores,
         key=lambda x: x[1],
         reverse=True,
-    )[:18]
+    )[:55]
 
     # =========================
     # STAGE 2: FULL MATCH
