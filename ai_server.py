@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from PIL import Image
 
-app = FastAPI(title="NEXORA Fast Hybrid Mobile Matcher")
+app = FastAPI(title="NEXORA Ultra Mobile Matcher")
 
 app.add_middleware(
     CORSMiddleware,
@@ -35,6 +35,8 @@ CARD_DIRS = [
 CANON_W = 480
 CANON_H = 672
 TOP_K = 3
+TOP_REF_LIMIT = 18
+
 REFERENCE_DB: list[dict[str, Any]] = []
 
 
@@ -46,7 +48,7 @@ class PredictRequest(BaseModel):
 
 
 # =========================
-# HELPERS
+# BASIC HELPERS
 # =========================
 def load_image_from_base64(data_url: str) -> np.ndarray:
     if "," in data_url:
@@ -61,19 +63,31 @@ def load_image_from_base64(data_url: str) -> np.ndarray:
 
 
 def order_points(pts: np.ndarray) -> np.ndarray:
-    rect = np.zeros((4, 2), dtype="float32")
+    rect = np.zeros((4, 2), dtype=np.float32)
     s = pts.sum(axis=1)
     diff = np.diff(pts, axis=1)
 
-    rect[0] = pts[np.argmin(s)]
-    rect[2] = pts[np.argmax(s)]
-    rect[1] = pts[np.argmin(diff)]
-    rect[3] = pts[np.argmax(diff)]
+    rect[0] = pts[np.argmin(s)]      # top-left
+    rect[2] = pts[np.argmax(s)]      # bottom-right
+    rect[1] = pts[np.argmin(diff)]   # top-right
+    rect[3] = pts[np.argmax(diff)]   # bottom-left
     return rect
 
 
+def safe_resize(image: np.ndarray, size: tuple[int, int]) -> np.ndarray:
+    w, h = size
+    if image is None or image.size == 0:
+        return np.zeros((h, w, 3), dtype=np.uint8)
+    return cv2.resize(image, (w, h))
+
+
+# =========================
+# IMAGE ENHANCEMENT
+# =========================
 def enhance_mobile_capture(image: np.ndarray) -> np.ndarray:
-    # เร็ว + เก่งในที่มืด
+    """
+    เน้นเร็ว + ช่วยตอนมืด + ไม่หนัก CPU
+    """
     image = cv2.GaussianBlur(image, (3, 3), 0)
 
     lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
@@ -82,8 +96,8 @@ def enhance_mobile_capture(image: np.ndarray) -> np.ndarray:
     clahe = cv2.createCLAHE(clipLimit=2.2, tileGridSize=(8, 8))
     l = clahe.apply(l)
 
-    merged = cv2.merge((l, a, b))
-    image = cv2.cvtColor(merged, cv2.COLOR_LAB2BGR)
+    lab = cv2.merge((l, a, b))
+    image = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
 
     kernel = np.array(
         [
@@ -94,9 +108,13 @@ def enhance_mobile_capture(image: np.ndarray) -> np.ndarray:
         dtype=np.float32,
     )
     image = cv2.filter2D(image, -1, kernel)
+
     return image
 
 
+# =========================
+# CARD NORMALIZATION
+# =========================
 def warp_card(image: np.ndarray) -> np.ndarray:
     original = image.copy()
     h, w = image.shape[:2]
@@ -131,7 +149,7 @@ def warp_card(image: np.ndarray) -> np.ndarray:
         approx = cv2.approxPolyDP(cnt, 0.02 * peri, True)
 
         if len(approx) == 4:
-            best = approx.reshape(4, 2).astype("float32")
+            best = approx.reshape(4, 2).astype(np.float32)
             break
 
     if best is not None:
@@ -144,10 +162,11 @@ def warp_card(image: np.ndarray) -> np.ndarray:
                 [CANON_W - 1, CANON_H - 1],
                 [0, CANON_H - 1],
             ],
-            dtype="float32",
+            dtype=np.float32,
         )
         matrix = cv2.getPerspectiveTransform(rect, dst)
-        return cv2.warpPerspective(original, matrix, (CANON_W, CANON_H))
+        warped = cv2.warpPerspective(original, matrix, (CANON_W, CANON_H))
+        return warped
 
     return cv2.resize(original, (CANON_W, CANON_H))
 
@@ -166,41 +185,72 @@ def preprocess_card(image: np.ndarray) -> np.ndarray:
     return image
 
 
+# =========================
+# ROI CROPS
+# =========================
 def crop_right_number_strip(image: np.ndarray) -> np.ndarray:
     h, w = image.shape[:2]
-    strip = image[int(h * 0.10):int(h * 0.84), int(w * 0.82):int(w * 0.99)]
+    x1 = int(w * 0.82)
+    x2 = int(w * 0.99)
+    y1 = int(h * 0.10)
+    y2 = int(h * 0.84)
+
+    strip = image[y1:y2, x1:x2]
     strip = cv2.rotate(strip, cv2.ROTATE_90_COUNTERCLOCKWISE)
-    return cv2.resize(strip, (240, 76))
+    return safe_resize(strip, (240, 76))
 
 
 def crop_top_title(image: np.ndarray) -> np.ndarray:
     h, w = image.shape[:2]
-    title = image[int(h * 0.015):int(h * 0.145), int(w * 0.18):int(w * 0.82)]
-    return cv2.resize(title, (360, 96))
+    x1 = int(w * 0.18)
+    x2 = int(w * 0.82)
+    y1 = int(h * 0.015)
+    y2 = int(h * 0.145)
+
+    title = image[y1:y2, x1:x2]
+    return safe_resize(title, (360, 96))
 
 
 def crop_bottom_stats(image: np.ndarray) -> np.ndarray:
     h, w = image.shape[:2]
-    stats = image[int(h * 0.76):int(h * 0.97), int(w * 0.18):int(w * 0.86)]
-    return cv2.resize(stats, (360, 120))
+    x1 = int(w * 0.18)
+    x2 = int(w * 0.86)
+    y1 = int(h * 0.76)
+    y2 = int(h * 0.97)
+
+    stats = image[y1:y2, x1:x2]
+    return safe_resize(stats, (360, 120))
 
 
 def crop_bottom_left_stats(image: np.ndarray) -> np.ndarray:
     h, w = image.shape[:2]
-    roi = image[int(h * 0.78):int(h * 0.98), int(w * 0.04):int(w * 0.38)]
-    return cv2.resize(roi, (180, 100))
+    x1 = int(w * 0.04)
+    x2 = int(w * 0.38)
+    y1 = int(h * 0.78)
+    y2 = int(h * 0.98)
+
+    roi = image[y1:y2, x1:x2]
+    return safe_resize(roi, (180, 100))
 
 
 def crop_bottom_right_stats(image: np.ndarray) -> np.ndarray:
     h, w = image.shape[:2]
-    roi = image[int(h * 0.78):int(h * 0.98), int(w * 0.62):int(w * 0.96)]
-    return cv2.resize(roi, (180, 100))
+    x1 = int(w * 0.62)
+    x2 = int(w * 0.96)
+    y1 = int(h * 0.78)
+    y2 = int(h * 0.98)
+
+    roi = image[y1:y2, x1:x2]
+    return safe_resize(roi, (180, 100))
 
 
 def global_thumb(image: np.ndarray) -> np.ndarray:
-    return cv2.resize(image, (96, 128))
+    return safe_resize(image, (96, 128))
 
 
+# =========================
+# FEATURE NORMALIZATION
+# =========================
 def normalize_gray(image: np.ndarray) -> np.ndarray:
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     gray = cv2.equalizeHist(gray)
@@ -208,17 +258,52 @@ def normalize_gray(image: np.ndarray) -> np.ndarray:
     return gray.astype(np.float32) / 255.0
 
 
-def corr_score(a: np.ndarray, b: np.ndarray) -> float:
-    a = a.reshape(-1)
-    b = b.reshape(-1)
+def normalize_binary_text(image: np.ndarray) -> np.ndarray:
+    """
+    ทำให้เลข/ตัวอักษรเด่นขึ้น ช่วยตอนมืดและเบลอ
+    """
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    gray = cv2.equalizeHist(gray)
+    gray = cv2.GaussianBlur(gray, (3, 3), 0)
 
-    a_std = a.std()
-    b_std = b.std()
+    th = cv2.adaptiveThreshold(
+        gray,
+        255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY,
+        21,
+        5,
+    )
+    th = cv2.GaussianBlur(th, (3, 3), 0)
+    return th.astype(np.float32) / 255.0
+
+
+def corr_score(a: np.ndarray, b: np.ndarray) -> float:
+    a_flat = a.reshape(-1)
+    b_flat = b.reshape(-1)
+
+    a_std = float(a_flat.std())
+    b_std = float(b_flat.std())
 
     if a_std < 1e-6 or b_std < 1e-6:
         return 0.0
 
-    return float(np.corrcoef(a, b)[0, 1])
+    score = float(np.corrcoef(a_flat, b_flat)[0, 1])
+
+    if np.isnan(score):
+        return 0.0
+
+    return score
+
+
+def blended_score(gray_a: np.ndarray, gray_b: np.ndarray, bin_a: np.ndarray, bin_b: np.ndarray) -> float:
+    """
+    เอา gray + binary มารวมกัน
+    เพื่อให้ทั้งภาพรวมและตัวอักษรมีผลพร้อมกัน
+    """
+    s_gray = corr_score(gray_a, gray_b)
+    s_bin = corr_score(bin_a, bin_b)
+    return (s_gray * 0.6) + (s_bin * 0.4)
 
 
 def extract_card_no_from_filename(path: Path) -> str | None:
@@ -239,9 +324,10 @@ def build_reference_db() -> list[dict[str, Any]]:
             break
 
     if card_dir is None:
+        print("❌ ไม่เจอโฟลเดอร์การ์ดอ้างอิง")
         return refs
 
-    files = []
+    files: list[Path] = []
     for ext in ("*.jpg", "*.jpeg", "*.png", "*.webp"):
         files.extend(card_dir.glob(ext))
 
@@ -256,15 +342,27 @@ def build_reference_db() -> list[dict[str, Any]]:
 
         ref = preprocess_card(ref)
 
+        strip = crop_right_number_strip(ref)
+        title = crop_top_title(ref)
+        stats = crop_bottom_stats(ref)
+        stats_l = crop_bottom_left_stats(ref)
+        stats_r = crop_bottom_right_stats(ref)
+        global_img = global_thumb(ref)
+
         refs.append(
             {
                 "cardNo": card_no,
-                "global": normalize_gray(global_thumb(ref)),
-                "strip": normalize_gray(crop_right_number_strip(ref)),
-                "title": normalize_gray(crop_top_title(ref)),
-                "stats": normalize_gray(crop_bottom_stats(ref)),
-                "stats_l": normalize_gray(crop_bottom_left_stats(ref)),
-                "stats_r": normalize_gray(crop_bottom_right_stats(ref)),
+                "global_g": normalize_gray(global_img),
+                "strip_g": normalize_gray(strip),
+                "title_g": normalize_gray(title),
+                "stats_g": normalize_gray(stats),
+                "stats_l_g": normalize_gray(stats_l),
+                "stats_r_g": normalize_gray(stats_r),
+                "strip_b": normalize_binary_text(strip),
+                "title_b": normalize_binary_text(title),
+                "stats_b": normalize_binary_text(stats),
+                "stats_l_b": normalize_binary_text(stats_l),
+                "stats_r_b": normalize_binary_text(stats_r),
             }
         )
 
@@ -272,43 +370,88 @@ def build_reference_db() -> list[dict[str, Any]]:
     return refs
 
 
+def ensure_reference_db() -> None:
+    global REFERENCE_DB
+    if not REFERENCE_DB:
+        REFERENCE_DB = build_reference_db()
+
+
+# =========================
+# FEATURE EXTRACTION
+# =========================
 def build_variant_features(img: np.ndarray) -> dict[str, Any]:
+    strip = crop_right_number_strip(img)
+    title = crop_top_title(img)
+    stats = crop_bottom_stats(img)
+    stats_l = crop_bottom_left_stats(img)
+    stats_r = crop_bottom_right_stats(img)
+    global_img = global_thumb(img)
+
     return {
-        "global": normalize_gray(global_thumb(img)),
-        "strip": normalize_gray(crop_right_number_strip(img)),
-        "title": normalize_gray(crop_top_title(img)),
-        "stats": normalize_gray(crop_bottom_stats(img)),
-        "stats_l": normalize_gray(crop_bottom_left_stats(img)),
-        "stats_r": normalize_gray(crop_bottom_right_stats(img)),
+        "global_g": normalize_gray(global_img),
+        "strip_g": normalize_gray(strip),
+        "title_g": normalize_gray(title),
+        "stats_g": normalize_gray(stats),
+        "stats_l_g": normalize_gray(stats_l),
+        "stats_r_g": normalize_gray(stats_r),
+        "strip_b": normalize_binary_text(strip),
+        "title_b": normalize_binary_text(title),
+        "stats_b": normalize_binary_text(stats),
+        "stats_l_b": normalize_binary_text(stats_l),
+        "stats_r_b": normalize_binary_text(stats_r),
     }
 
 
-def score_against_reference(vf: dict[str, Any], ref: dict[str, Any]) -> float:
-    s_strip = corr_score(vf["strip"], ref["strip"])
-    s_title = corr_score(vf["title"], ref["title"])
-    s_stats = corr_score(vf["stats"], ref["stats"])
-    s_stats_l = corr_score(vf["stats_l"], ref["stats_l"])
-    s_stats_r = corr_score(vf["stats_r"], ref["stats_r"])
-    s_global = corr_score(vf["global"], ref["global"])
+# =========================
+# SCORING
+# =========================
+def score_prefilter(vf: dict[str, Any], ref: dict[str, Any]) -> float:
+    s_strip = blended_score(vf["strip_g"], ref["strip_g"], vf["strip_b"], ref["strip_b"])
+    s_title = blended_score(vf["title_g"], ref["title_g"], vf["title_b"], ref["title_b"])
+    s_stats = blended_score(vf["stats_g"], ref["stats_g"], vf["stats_b"], ref["stats_b"])
+    s_global = corr_score(vf["global_g"], ref["global_g"])
 
+    # ด่านแรก: เน้นเลขขอบ + title + stats + ภาพรวม
     return float(
-        (s_strip * 0.36)
+        (s_strip * 0.38)
         + (s_title * 0.24)
-        + (s_stats * 0.16)
-        + (s_stats_l * 0.04)
-        + (s_stats_r * 0.04)
+        + (s_stats * 0.20)
+        + (s_global * 0.18)
+    )
+
+
+def score_final(vf: dict[str, Any], ref: dict[str, Any]) -> float:
+    s_strip = blended_score(vf["strip_g"], ref["strip_g"], vf["strip_b"], ref["strip_b"])
+    s_title = blended_score(vf["title_g"], ref["title_g"], vf["title_b"], ref["title_b"])
+    s_stats = blended_score(vf["stats_g"], ref["stats_g"], vf["stats_b"], ref["stats_b"])
+    s_stats_l = blended_score(vf["stats_l_g"], ref["stats_l_g"], vf["stats_l_b"], ref["stats_l_b"])
+    s_stats_r = blended_score(vf["stats_r_g"], ref["stats_r_g"], vf["stats_r_b"], ref["stats_r_b"])
+    s_global = corr_score(vf["global_g"], ref["global_g"])
+
+    # ด่านละเอียด: ให้ global ช่วย, แต่เลขขอบยังสำคัญสุด
+    return float(
+        (s_strip * 0.34)
+        + (s_title * 0.22)
+        + (s_stats * 0.18)
+        + (s_stats_l * 0.05)
+        + (s_stats_r * 0.05)
         + (s_global * 0.16)
     )
 
 
+# =========================
+# PREDICTION
+# =========================
 def predict_card(candidate_raw: np.ndarray) -> dict[str, Any]:
-    global REFERENCE_DB
+    ensure_reference_db()
 
     if not REFERENCE_DB:
-        REFERENCE_DB = build_reference_db()
-
-    if not REFERENCE_DB:
-        return {"cardNo": None, "confidence": 0.0, "top3": []}
+        return {
+            "cardNo": None,
+            "confidence": 0.0,
+            "top3": [],
+            "error": "No reference cards loaded",
+        }
 
     candidate = preprocess_card(candidate_raw)
 
@@ -316,42 +459,59 @@ def predict_card(candidate_raw: np.ndarray) -> dict[str, Any]:
         candidate,
         cv2.rotate(candidate, cv2.ROTATE_180),
     ]
-
     variant_features = [build_variant_features(v) for v in variants]
 
+    # -------------------------
+    # STAGE 1: PREFILTER FAST
+    # -------------------------
     coarse_scores: list[tuple[dict[str, Any], float]] = []
 
     for ref in REFERENCE_DB:
         best = -999.0
         for vf in variant_features:
-            score = score_against_reference(vf, ref)
+            score = score_prefilter(vf, ref)
             if score > best:
                 best = score
         coarse_scores.append((ref, best))
 
-    top_refs = sorted(coarse_scores, key=lambda x: x[1], reverse=True)[:18]
+    top_refs = sorted(coarse_scores, key=lambda x: x[1], reverse=True)[:TOP_REF_LIMIT]
 
+    # -------------------------
+    # STAGE 2: FINAL MATCH
+    # -------------------------
     best_scores: dict[str, float] = {}
 
     for vf in variant_features:
         for ref, _ in top_refs:
-            score = score_against_reference(vf, ref)
+            score = score_final(vf, ref)
             card_no = ref["cardNo"]
 
-            if card_no not in best_scores or score > best_scores[card_no]:
+            current = best_scores.get(card_no)
+            if current is None or score > current:
                 best_scores[card_no] = score
 
     ranked = sorted(best_scores.items(), key=lambda x: x[1], reverse=True)
     top3 = ranked[:TOP_K]
 
     if not top3:
-        return {"cardNo": None, "confidence": 0.0, "top3": []}
+        return {
+            "cardNo": None,
+            "confidence": 0.0,
+            "top3": [],
+        }
 
     best_card_no, best_score = top3[0]
     second_score = top3[1][1] if len(top3) > 1 else -1.0
 
     margin = max(0.0, best_score - second_score)
-    confidence = min(0.99, max(0.55, 0.82 + margin))
+
+    # ทำ confidence ให้สมจริงขึ้น
+    if best_score < 0.25:
+        confidence = 0.40
+    elif best_score < 0.35:
+        confidence = 0.55
+    else:
+        confidence = min(0.99, max(0.60, 0.80 + (margin * 1.2)))
 
     return {
         "cardNo": best_card_no,
@@ -363,11 +523,14 @@ def predict_card(candidate_raw: np.ndarray) -> dict[str, Any]:
     }
 
 
+# =========================
+# ROUTES
+# =========================
 @app.get("/")
 def root() -> dict[str, Any]:
     return {
         "ok": True,
-        "message": "NEXORA Fast Hybrid Mobile Matcher is running",
+        "message": "NEXORA Ultra Mobile Matcher is running",
         "references": len(REFERENCE_DB),
     }
 
@@ -379,7 +542,8 @@ def predict(req: PredictRequest) -> dict[str, Any]:
             return {"ok": True}
 
         image = load_image_from_base64(req.image)
-        return predict_card(image)
+        result = predict_card(image)
+        return result
 
     except Exception as e:
         return {
