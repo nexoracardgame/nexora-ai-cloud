@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from PIL import Image
 
-app = FastAPI(title="NEXORA Scan AI")
+app = FastAPI(title="NEXORA Fast Hybrid Mobile Matcher")
 
 app.add_middleware(
     CORSMiddleware,
@@ -35,6 +35,8 @@ CARD_DIRS = [
 CANON_W = 480
 CANON_H = 672
 TOP_K = 3
+REFERENCE_DB: list[dict[str, Any]] = []
+
 
 # =========================
 # REQUEST
@@ -63,27 +65,35 @@ def order_points(pts: np.ndarray) -> np.ndarray:
     s = pts.sum(axis=1)
     diff = np.diff(pts, axis=1)
 
-    rect[0] = pts[np.argmin(s)]   # top-left
-    rect[2] = pts[np.argmax(s)]   # bottom-right
-    rect[1] = pts[np.argmin(diff)]  # top-right
-    rect[3] = pts[np.argmax(diff)]  # bottom-left
+    rect[0] = pts[np.argmin(s)]
+    rect[2] = pts[np.argmax(s)]
+    rect[1] = pts[np.argmin(diff)]
+    rect[3] = pts[np.argmax(diff)]
     return rect
 
 
 def enhance_mobile_capture(image: np.ndarray) -> np.ndarray:
-    # เบาๆ พอ ไม่หนัก CPU เกิน
-    image = cv2.fastNlMeansDenoisingColored(image, None, 3, 3, 7, 21)
+    # เร็ว + เก่งในที่มืด
+    image = cv2.GaussianBlur(image, (3, 3), 0)
+
+    lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+    l, a, b = cv2.split(lab)
+
+    clahe = cv2.createCLAHE(clipLimit=2.2, tileGridSize=(8, 8))
+    l = clahe.apply(l)
+
+    merged = cv2.merge((l, a, b))
+    image = cv2.cvtColor(merged, cv2.COLOR_LAB2BGR)
 
     kernel = np.array(
         [
             [0, -1, 0],
-            [-1, 5.2, -1],
+            [-1, 5.0, -1],
             [0, -1, 0],
         ],
         dtype=np.float32,
     )
     image = cv2.filter2D(image, -1, kernel)
-    image = cv2.convertScaleAbs(image, alpha=1.08, beta=4)
     return image
 
 
@@ -151,80 +161,39 @@ def upright_card(image: np.ndarray) -> np.ndarray:
 
 def preprocess_card(image: np.ndarray) -> np.ndarray:
     image = enhance_mobile_capture(image)
-    warped = warp_card(image)
-    upright = upright_card(warped)
-    return upright
+    image = warp_card(image)
+    image = upright_card(image)
+    return image
 
 
 def crop_right_number_strip(image: np.ndarray) -> np.ndarray:
-    """
-    Card No แนวตั้งด้านขวา
-    """
     h, w = image.shape[:2]
-    x1 = int(w * 0.82)
-    x2 = int(w * 0.99)
-    y1 = int(h * 0.10)
-    y2 = int(h * 0.84)
-
-    strip = image[y1:y2, x1:x2]
+    strip = image[int(h * 0.10):int(h * 0.84), int(w * 0.82):int(w * 0.99)]
     strip = cv2.rotate(strip, cv2.ROTATE_90_COUNTERCLOCKWISE)
     return cv2.resize(strip, (240, 76))
 
 
 def crop_top_title(image: np.ndarray) -> np.ndarray:
-    """
-    ชื่อการ์ดด้านบน
-    """
     h, w = image.shape[:2]
-    x1 = int(w * 0.18)
-    x2 = int(w * 0.82)
-    y1 = int(h * 0.015)
-    y2 = int(h * 0.145)
-
-    title = image[y1:y2, x1:x2]
+    title = image[int(h * 0.015):int(h * 0.145), int(w * 0.18):int(w * 0.82)]
     return cv2.resize(title, (360, 96))
 
 
 def crop_bottom_stats(image: np.ndarray) -> np.ndarray:
-    """
-    โซนล่างสำหรับ ATK / SUP / ตัวเลขพลัง
-    เน้นส่วนกลางล่างถึงขวาล่าง
-    """
     h, w = image.shape[:2]
-    x1 = int(w * 0.18)
-    x2 = int(w * 0.86)
-    y1 = int(h * 0.76)
-    y2 = int(h * 0.97)
-
-    stats = image[y1:y2, x1:x2]
+    stats = image[int(h * 0.76):int(h * 0.97), int(w * 0.18):int(w * 0.86)]
     return cv2.resize(stats, (360, 120))
 
 
 def crop_bottom_left_stats(image: np.ndarray) -> np.ndarray:
-    """
-    เผื่อเลขฝั่งซ้ายล่าง
-    """
     h, w = image.shape[:2]
-    x1 = int(w * 0.04)
-    x2 = int(w * 0.38)
-    y1 = int(h * 0.78)
-    y2 = int(h * 0.98)
-
-    roi = image[y1:y2, x1:x2]
+    roi = image[int(h * 0.78):int(h * 0.98), int(w * 0.04):int(w * 0.38)]
     return cv2.resize(roi, (180, 100))
 
 
 def crop_bottom_right_stats(image: np.ndarray) -> np.ndarray:
-    """
-    เผื่อเลขฝั่งขวาล่าง
-    """
     h, w = image.shape[:2]
-    x1 = int(w * 0.62)
-    x2 = int(w * 0.96)
-    y1 = int(h * 0.78)
-    y2 = int(h * 0.98)
-
-    roi = image[y1:y2, x1:x2]
+    roi = image[int(h * 0.78):int(h * 0.98), int(w * 0.62):int(w * 0.96)]
     return cv2.resize(roi, (180, 100))
 
 
@@ -240,35 +209,16 @@ def normalize_gray(image: np.ndarray) -> np.ndarray:
 
 
 def corr_score(a: np.ndarray, b: np.ndarray) -> float:
-    a_flat = a.reshape(-1)
-    b_flat = b.reshape(-1)
+    a = a.reshape(-1)
+    b = b.reshape(-1)
 
-    a_mean = a_flat.mean()
-    b_mean = b_flat.mean()
-    a_std = a_flat.std()
-    b_std = b_flat.std()
+    a_std = a.std()
+    b_std = b.std()
 
     if a_std < 1e-6 or b_std < 1e-6:
         return 0.0
 
-    score = np.mean(
-        ((a_flat - a_mean) / a_std) *
-        ((b_flat - b_mean) / b_std)
-    )
-    return float(score)
-
-
-def hist_score(a: np.ndarray, b: np.ndarray) -> float:
-    hsv_a = cv2.cvtColor(a, cv2.COLOR_BGR2HSV)
-    hsv_b = cv2.cvtColor(b, cv2.COLOR_BGR2HSV)
-
-    hist_a = cv2.calcHist([hsv_a], [0, 1], None, [30, 32], [0, 180, 0, 256])
-    hist_b = cv2.calcHist([hsv_b], [0, 1], None, [30, 32], [0, 180, 0, 256])
-
-    cv2.normalize(hist_a, hist_a)
-    cv2.normalize(hist_b, hist_b)
-
-    return float(cv2.compareHist(hist_a, hist_b, cv2.HISTCMP_CORREL))
+    return float(np.corrcoef(a, b)[0, 1])
 
 
 def extract_card_no_from_filename(path: Path) -> str | None:
@@ -279,9 +229,6 @@ def extract_card_no_from_filename(path: Path) -> str | None:
 # =========================
 # REFERENCE DB
 # =========================
-REFERENCE_DB: list[dict[str, Any]] = []
-
-
 def build_reference_db() -> list[dict[str, Any]]:
     refs: list[dict[str, Any]] = []
 
@@ -292,16 +239,13 @@ def build_reference_db() -> list[dict[str, Any]]:
             break
 
     if card_dir is None:
-        print("❌ ไม่เจอโฟลเดอร์การ์ดอ้างอิง")
         return refs
 
     files = []
     for ext in ("*.jpg", "*.jpeg", "*.png", "*.webp"):
         files.extend(card_dir.glob(ext))
 
-    files = sorted(files)
-
-    for path in files:
+    for path in sorted(files):
         card_no = extract_card_no_from_filename(path)
         if not card_no:
             continue
@@ -315,14 +259,12 @@ def build_reference_db() -> list[dict[str, Any]]:
         refs.append(
             {
                 "cardNo": card_no,
-                "path": str(path),
                 "global": normalize_gray(global_thumb(ref)),
                 "strip": normalize_gray(crop_right_number_strip(ref)),
                 "title": normalize_gray(crop_top_title(ref)),
                 "stats": normalize_gray(crop_bottom_stats(ref)),
                 "stats_l": normalize_gray(crop_bottom_left_stats(ref)),
                 "stats_r": normalize_gray(crop_bottom_right_stats(ref)),
-                "color": ref,
             }
         )
 
@@ -330,49 +272,8 @@ def build_reference_db() -> list[dict[str, Any]]:
     return refs
 
 
-@app.on_event("startup")
-def startup_event() -> None:
-    global REFERENCE_DB
-    REFERENCE_DB = build_reference_db()
-
-
-# =========================
-# SCORING
-# =========================
-def score_against_reference(
-    cand_global: np.ndarray,
-    cand_strip: np.ndarray,
-    cand_title: np.ndarray,
-    cand_stats: np.ndarray,
-    cand_stats_l: np.ndarray,
-    cand_stats_r: np.ndarray,
-    cand_img: np.ndarray,
-    ref: dict[str, Any],
-) -> float:
-    s_global = corr_score(cand_global, ref["global"])
-    s_strip = corr_score(cand_strip, ref["strip"])
-    s_title = corr_score(cand_title, ref["title"])
-    s_stats = corr_score(cand_stats, ref["stats"])
-    s_stats_l = corr_score(cand_stats_l, ref["stats_l"])
-    s_stats_r = corr_score(cand_stats_r, ref["stats_r"])
-    s_color = hist_score(cand_img, ref["color"])
-
-    # เน้นเลขขอบ + ชื่อ + ค่าล่าง
-    final = (
-        (s_strip * 0.28)
-        + (s_title * 0.20)
-        + (s_stats * 0.22)
-        + (s_stats_l * 0.08)
-        + (s_stats_r * 0.08)
-        + (s_global * 0.08)
-        + (s_color * 0.06)
-    )
-    return float(final)
-
-
 def build_variant_features(img: np.ndarray) -> dict[str, Any]:
     return {
-        "img": img,
         "global": normalize_gray(global_thumb(img)),
         "strip": normalize_gray(crop_right_number_strip(img)),
         "title": normalize_gray(crop_top_title(img)),
@@ -382,18 +283,35 @@ def build_variant_features(img: np.ndarray) -> dict[str, Any]:
     }
 
 
+def score_against_reference(vf: dict[str, Any], ref: dict[str, Any]) -> float:
+    s_strip = corr_score(vf["strip"], ref["strip"])
+    s_title = corr_score(vf["title"], ref["title"])
+    s_stats = corr_score(vf["stats"], ref["stats"])
+    s_stats_l = corr_score(vf["stats_l"], ref["stats_l"])
+    s_stats_r = corr_score(vf["stats_r"], ref["stats_r"])
+    s_global = corr_score(vf["global"], ref["global"])
+
+    return float(
+        (s_strip * 0.36)
+        + (s_title * 0.24)
+        + (s_stats * 0.16)
+        + (s_stats_l * 0.04)
+        + (s_stats_r * 0.04)
+        + (s_global * 0.16)
+    )
+
+
 def predict_card(candidate_raw: np.ndarray) -> dict[str, Any]:
+    global REFERENCE_DB
+
     if not REFERENCE_DB:
-        return {
-            "cardNo": None,
-            "confidence": 0.0,
-            "top3": [],
-            "error": "No reference cards loaded",
-        }
+        REFERENCE_DB = build_reference_db()
+
+    if not REFERENCE_DB:
+        return {"cardNo": None, "confidence": 0.0, "top3": []}
 
     candidate = preprocess_card(candidate_raw)
 
-    # มือถือจริงส่วนใหญ่พอแค่ 2 มุม
     variants = [
         candidate,
         cv2.rotate(candidate, cv2.ROTATE_180),
@@ -401,62 +319,23 @@ def predict_card(candidate_raw: np.ndarray) -> dict[str, Any]:
 
     variant_features = [build_variant_features(v) for v in variants]
 
-    # =========================
-    # STAGE 1: SMART PREFILTER
-    # =========================
     coarse_scores: list[tuple[dict[str, Any], float]] = []
 
     for ref in REFERENCE_DB:
         best = -999.0
-
         for vf in variant_features:
-            s_strip = corr_score(vf["strip"], ref["strip"])
-            s_title = corr_score(vf["title"], ref["title"])
-            s_stats = corr_score(vf["stats"], ref["stats"])
-            s_stats_l = corr_score(vf["stats_l"], ref["stats_l"])
-            s_stats_r = corr_score(vf["stats_r"], ref["stats_r"])
-            s_global = corr_score(vf["global"], ref["global"])
-
-            # ตัดใบคล้ายกันตั้งแต่ด่านแรก
-            score = (
-                (s_strip * 0.32)
-                + (s_title * 0.18)
-                + (s_stats * 0.24)
-                + (s_stats_l * 0.08)
-                + (s_stats_r * 0.08)
-                + (s_global * 0.10)
-            )
-
+            score = score_against_reference(vf, ref)
             if score > best:
                 best = score
-
         coarse_scores.append((ref, best))
 
-    # ขยาย top set นิดหนึ่ง กันหลุด
-    top_refs = sorted(
-        coarse_scores,
-        key=lambda x: x[1],
-        reverse=True,
-    )[:55]
+    top_refs = sorted(coarse_scores, key=lambda x: x[1], reverse=True)[:18]
 
-    # =========================
-    # STAGE 2: FULL MATCH
-    # =========================
     best_scores: dict[str, float] = {}
 
     for vf in variant_features:
         for ref, _ in top_refs:
-            score = score_against_reference(
-                vf["global"],
-                vf["strip"],
-                vf["title"],
-                vf["stats"],
-                vf["stats_l"],
-                vf["stats_r"],
-                vf["img"],
-                ref,
-            )
-
+            score = score_against_reference(vf, ref)
             card_no = ref["cardNo"]
 
             if card_no not in best_scores or score > best_scores[card_no]:
@@ -466,17 +345,13 @@ def predict_card(candidate_raw: np.ndarray) -> dict[str, Any]:
     top3 = ranked[:TOP_K]
 
     if not top3:
-        return {
-            "cardNo": None,
-            "confidence": 0.0,
-            "top3": [],
-        }
+        return {"cardNo": None, "confidence": 0.0, "top3": []}
 
     best_card_no, best_score = top3[0]
     second_score = top3[1][1] if len(top3) > 1 else -1.0
 
     margin = max(0.0, best_score - second_score)
-    confidence = min(0.99, max(0.45, 0.80 + margin))
+    confidence = min(0.99, max(0.55, 0.82 + margin))
 
     return {
         "cardNo": best_card_no,
@@ -488,14 +363,11 @@ def predict_card(candidate_raw: np.ndarray) -> dict[str, Any]:
     }
 
 
-# =========================
-# ROUTES
-# =========================
 @app.get("/")
 def root() -> dict[str, Any]:
     return {
         "ok": True,
-        "message": "NEXORA Card Matcher is running",
+        "message": "NEXORA Fast Hybrid Mobile Matcher is running",
         "references": len(REFERENCE_DB),
     }
 
@@ -507,8 +379,8 @@ def predict(req: PredictRequest) -> dict[str, Any]:
             return {"ok": True}
 
         image = load_image_from_base64(req.image)
-        result = predict_card(image)
-        return result
+        return predict_card(image)
+
     except Exception as e:
         return {
             "cardNo": None,
