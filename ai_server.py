@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import base64
 import io
-import os
 import re
 from pathlib import Path
 from typing import Any
@@ -24,26 +23,31 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ====== CONFIG ======
+# =========================
+# CONFIG
+# =========================
 BASE_DIR = Path(__file__).resolve().parent
 CARD_DIRS = [
     BASE_DIR / "public" / "cards",
     BASE_DIR / "cards",
 ]
+
 CANON_W = 480
 CANON_H = 672
 TOP_K = 3
 
-# ====== REQUEST ======
+
+# =========================
+# REQUEST
+# =========================
 class PredictRequest(BaseModel):
     image: str
 
 
-# ====== HELPERS ======
+# =========================
+# HELPERS
+# =========================
 def load_image_from_base64(data_url: str) -> np.ndarray:
-    """
-    รับ data:image/...;base64,... แล้วคืนเป็น BGR image ของ OpenCV
-    """
     if "," in data_url:
         _, encoded = data_url.split(",", 1)
     else:
@@ -52,8 +56,7 @@ def load_image_from_base64(data_url: str) -> np.ndarray:
     image_bytes = base64.b64decode(encoded)
     pil_image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
     rgb = np.array(pil_image)
-    bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-    return bgr
+    return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
 
 
 def order_points(pts: np.ndarray) -> np.ndarray:
@@ -61,18 +64,14 @@ def order_points(pts: np.ndarray) -> np.ndarray:
     s = pts.sum(axis=1)
     diff = np.diff(pts, axis=1)
 
-    rect[0] = pts[np.argmin(s)]   # top-left
-    rect[2] = pts[np.argmax(s)]   # bottom-right
-    rect[1] = pts[np.argmin(diff)]  # top-right
-    rect[3] = pts[np.argmax(diff)]  # bottom-left
+    rect[0] = pts[np.argmin(s)]
+    rect[2] = pts[np.argmax(s)]
+    rect[1] = pts[np.argmin(diff)]
+    rect[3] = pts[np.argmax(diff)]
     return rect
 
 
 def warp_card(image: np.ndarray) -> np.ndarray:
-    """
-    พยายามหาการ์ดจาก contour ใหญ่สุดแล้วดึงให้ตรง
-    ถ้าหาไม่ได้ ใช้ภาพเดิม resize แทน
-    """
     original = image.copy()
     h, w = image.shape[:2]
 
@@ -87,7 +86,9 @@ def warp_card(image: np.ndarray) -> np.ndarray:
     edges = cv2.Canny(blur, 60, 180)
     edges = cv2.dilate(edges, np.ones((3, 3), np.uint8), iterations=1)
 
-    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours, _ = cv2.findContours(
+        edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+    )
     contours = sorted(contours, key=cv2.contourArea, reverse=True)
 
     best = None
@@ -108,21 +109,24 @@ def warp_card(image: np.ndarray) -> np.ndarray:
     if best is not None:
         best = best / scale
         rect = order_points(best)
+
         dst = np.array(
-            [[0, 0], [CANON_W - 1, 0], [CANON_W - 1, CANON_H - 1], [0, CANON_H - 1]],
+            [
+                [0, 0],
+                [CANON_W - 1, 0],
+                [CANON_W - 1, CANON_H - 1],
+                [0, CANON_H - 1],
+            ],
             dtype="float32",
         )
+
         matrix = cv2.getPerspectiveTransform(rect, dst)
-        warped = cv2.warpPerspective(original, matrix, (CANON_W, CANON_H))
-        return warped
+        return cv2.warpPerspective(original, matrix, (CANON_W, CANON_H))
 
     return cv2.resize(original, (CANON_W, CANON_H))
 
 
 def upright_card(image: np.ndarray) -> np.ndarray:
-    """
-    ถ้าภาพนอน ให้หมุนเป็นแนวตั้งก่อน
-    """
     h, w = image.shape[:2]
     if w > h:
         image = cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)
@@ -130,57 +134,44 @@ def upright_card(image: np.ndarray) -> np.ndarray:
 
 
 def preprocess_card(image: np.ndarray) -> np.ndarray:
-    warped = warp_card(image)
-    upright = upright_card(warped)
-    return upright
+    return upright_card(warp_card(image))
 
 
 def crop_right_number_strip(image: np.ndarray) -> np.ndarray:
-    """
-    ครอปแถบขวาที่มีคำว่า Card No. และเลขแนวตั้ง
-    """
     h, w = image.shape[:2]
-    x1 = int(w * 0.86)
-    x2 = int(w * 0.98)
+    x1 = int(w * 0.82)
+    x2 = int(w * 0.99)
     y1 = int(h * 0.12)
     y2 = int(h * 0.82)
+
     strip = image[y1:y2, x1:x2]
-    # หมุนให้แถบแนวตั้งกลายเป็นแนวนอนเพื่อเทียบง่าย
     strip = cv2.rotate(strip, cv2.ROTATE_90_COUNTERCLOCKWISE)
-    strip = cv2.resize(strip, (220, 70))
-    return strip
+    return cv2.resize(strip, (220, 70))
 
 
 def crop_top_title(image: np.ndarray) -> np.ndarray:
-    """
-    ครอปแถบชื่อการ์ดบนหัว
-    """
     h, w = image.shape[:2]
     x1 = int(w * 0.22)
     x2 = int(w * 0.78)
     y1 = int(h * 0.02)
     y2 = int(h * 0.14)
+
     title = image[y1:y2, x1:x2]
-    title = cv2.resize(title, (320, 90))
-    return title
+    return cv2.resize(title, (320, 90))
 
 
 def global_thumb(image: np.ndarray) -> np.ndarray:
-    thumb = cv2.resize(image, (96, 128))
-    return thumb
+    return cv2.resize(image, (96, 128))
 
 
 def normalize_gray(image: np.ndarray) -> np.ndarray:
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     gray = cv2.equalizeHist(gray)
-    gray = gray.astype(np.float32) / 255.0
-    return gray
+    gray = cv2.GaussianBlur(gray, (3, 3), 0)
+    return gray.astype(np.float32) / 255.0
 
 
 def corr_score(a: np.ndarray, b: np.ndarray) -> float:
-    """
-    correlation แบบง่ายและเร็ว
-    """
     a_flat = a.reshape(-1)
     b_flat = b.reshape(-1)
 
@@ -193,8 +184,9 @@ def corr_score(a: np.ndarray, b: np.ndarray) -> float:
     if a_std < 1e-6 or b_std < 1e-6:
         return 0.0
 
-    score = np.mean(((a_flat - a_mean) / a_std) * ((b_flat - b_mean) / b_std))
-    return float(score)
+    return float(
+        np.mean(((a_flat - a_mean) / a_std) * ((b_flat - b_mean) / b_std))
+    )
 
 
 def hist_score(a: np.ndarray, b: np.ndarray) -> float:
@@ -215,12 +207,14 @@ def extract_card_no_from_filename(path: Path) -> str | None:
     return m.group(1) if m else None
 
 
-# ====== REFERENCE DB ======
+# =========================
+# REFERENCE DB
+# =========================
 REFERENCE_DB: list[dict[str, Any]] = []
 
 
 def build_reference_db() -> list[dict[str, Any]]:
-    refs: list[dict[str, Any]] = []
+    refs = []
 
     card_dir = None
     for d in CARD_DIRS:
@@ -229,16 +223,14 @@ def build_reference_db() -> list[dict[str, Any]]:
             break
 
     if card_dir is None:
-        print("❌ ไม่เจอโฟลเดอร์การ์ดอ้างอิง")
+        print("❌ ไม่เจอโฟลเดอร์การ์ด")
         return refs
 
     files = []
     for ext in ("*.jpg", "*.jpeg", "*.png", "*.webp"):
         files.extend(card_dir.glob(ext))
 
-    files = sorted(files)
-
-    for path in files:
+    for path in sorted(files):
         card_no = extract_card_no_from_filename(path)
         if not card_no:
             continue
@@ -252,7 +244,6 @@ def build_reference_db() -> list[dict[str, Any]]:
         refs.append(
             {
                 "cardNo": card_no,
-                "path": str(path),
                 "global": normalize_gray(global_thumb(ref)),
                 "strip": normalize_gray(crop_right_number_strip(ref)),
                 "title": normalize_gray(crop_top_title(ref)),
@@ -265,32 +256,14 @@ def build_reference_db() -> list[dict[str, Any]]:
 
 
 @app.on_event("startup")
-def startup_event() -> None:
+def startup_event():
     global REFERENCE_DB
     REFERENCE_DB = build_reference_db()
 
 
-# ====== PREDICT ======
-def score_against_reference(candidate: np.ndarray, ref: dict[str, Any]) -> float:
-    cand_global = normalize_gray(global_thumb(candidate))
-    cand_strip = normalize_gray(crop_right_number_strip(candidate))
-    cand_title = normalize_gray(crop_top_title(candidate))
-
-    s_global = corr_score(cand_global, ref["global"])
-    s_strip = corr_score(cand_strip, ref["strip"])
-    s_title = corr_score(cand_title, ref["title"])
-    s_color = hist_score(candidate, ref["color"])
-
-    # ให้น้ำหนักแถบเลข + ชื่อบนหัวมากที่สุด
-    final = (
-        (s_strip * 0.48)
-        + (s_title * 0.28)
-        + (s_global * 0.16)
-        + (s_color * 0.08)
-    )
-    return float(final)
-
-
+# =========================
+# PREDICT
+# =========================
 def predict_card(candidate_raw: np.ndarray) -> dict[str, Any]:
     if not REFERENCE_DB:
         return {
@@ -302,19 +275,56 @@ def predict_card(candidate_raw: np.ndarray) -> dict[str, Any]:
 
     candidate = preprocess_card(candidate_raw)
 
-    # ลองหลายมุมกันภาพกลับหัว
     variants = [
         candidate,
         cv2.rotate(candidate, cv2.ROTATE_180),
-        cv2.rotate(candidate, cv2.ROTATE_90_CLOCKWISE),
-        cv2.rotate(candidate, cv2.ROTATE_90_COUNTERCLOCKWISE),
     ]
 
-    best_scores: dict[str, float] = {}
-
+    variant_features = []
     for var in variants:
-        for ref in REFERENCE_DB:
-            score = score_against_reference(var, ref)
+        variant_features.append(
+            {
+                "img": var,
+                "global": normalize_gray(global_thumb(var)),
+                "strip": normalize_gray(crop_right_number_strip(var)),
+                "title": normalize_gray(crop_top_title(var)),
+            }
+        )
+
+    # 🚀 STAGE 1 PREFILTER
+    coarse_scores = []
+
+    for ref in REFERENCE_DB:
+        best = -999.0
+
+        for vf in variant_features:
+            score = (
+                corr_score(vf["strip"], ref["strip"]) * 0.60
+                + corr_score(vf["title"], ref["title"]) * 0.28
+                + corr_score(vf["global"], ref["global"]) * 0.12
+            )
+            best = max(best, score)
+
+        coarse_scores.append((ref, best))
+
+    top_refs = sorted(
+        coarse_scores,
+        key=lambda x: x[1],
+        reverse=True
+    )[:35]
+
+    # 🎯 STAGE 2 FULL MATCH
+    best_scores = {}
+
+    for vf in variant_features:
+        for ref, _ in top_refs:
+            score = (
+                corr_score(vf["strip"], ref["strip"]) * 0.50
+                + corr_score(vf["title"], ref["title"]) * 0.26
+                + corr_score(vf["global"], ref["global"]) * 0.16
+                + hist_score(vf["img"], ref["color"]) * 0.08
+            )
+
             card_no = ref["cardNo"]
 
             if card_no not in best_scores or score > best_scores[card_no]:
@@ -333,9 +343,8 @@ def predict_card(candidate_raw: np.ndarray) -> dict[str, Any]:
     best_card_no, best_score = top3[0]
     second_score = top3[1][1] if len(top3) > 1 else -1.0
 
-    # confidence แบบอ่านง่าย ไม่ใช่ 0% มั่วๆ
     margin = max(0.0, best_score - second_score)
-    confidence = min(0.99, max(0.05, 0.55 + margin))
+    confidence = min(0.99, max(0.45, 0.82 + margin))
 
     return {
         "cardNo": best_card_no,
@@ -348,7 +357,7 @@ def predict_card(candidate_raw: np.ndarray) -> dict[str, Any]:
 
 
 @app.get("/")
-def root() -> dict[str, Any]:
+def root():
     return {
         "ok": True,
         "message": "NEXORA Card Matcher is running",
@@ -357,11 +366,10 @@ def root() -> dict[str, Any]:
 
 
 @app.post("/predict")
-def predict(req: PredictRequest) -> dict[str, Any]:
+def predict(req: PredictRequest):
     try:
         image = load_image_from_base64(req.image)
-        result = predict_card(image)
-        return result
+        return predict_card(image)
     except Exception as e:
         return {
             "cardNo": None,
