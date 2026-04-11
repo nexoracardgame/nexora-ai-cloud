@@ -84,9 +84,14 @@ def preprocess_card(image: np.ndarray) -> np.ndarray:
 
 def crop_right_number_strip(image: np.ndarray) -> np.ndarray:
     h, w = image.shape[:2]
-    strip = image[int(h * 0.08):int(h * 0.86), int(w * 0.79):int(w * 0.995)]
+
+    strip = image[
+        int(h * 0.08):int(h * 0.88),
+        int(w * 0.77):int(w * 0.998)
+    ]
+
     strip = cv2.rotate(strip, cv2.ROTATE_90_COUNTERCLOCKWISE)
-    return safe_resize(strip, (260, 88))
+    return safe_resize(strip, (280, 96))
 
 
 def crop_top_title(image: np.ndarray) -> np.ndarray:
@@ -218,6 +223,7 @@ def read_card_number_from_strip(strip_img: np.ndarray) -> str | None:
 
     best_card = None
     best_score = -999.0
+    second_score = -999.0
 
     for ref in REFERENCE_DB:
         score = blended_score(
@@ -228,13 +234,24 @@ def read_card_number_from_strip(strip_img: np.ndarray) -> str | None:
         )
 
         if score > best_score:
+            second_score = best_score
             best_score = score
             best_card = ref["cardNo"]
+        elif score > second_score:
+            second_score = score
 
-    if best_score < 0.46:
-        return None
+    # 🎯 ใช้ margin แทน threshold แข็ง
+    margin = best_score - second_score
 
-    return best_card
+    # ถ้าใบชนะนำห่างพอ ให้ตอบเลย
+    if best_score >= 0.34 and margin >= 0.015:
+        return best_card
+
+    # ถ้า score สูงมากก็ตอบเลย
+    if best_score >= 0.42:
+        return best_card
+
+    return None
 
 
 def fallback_match(candidate: np.ndarray) -> tuple[str | None, float]:
