@@ -37,7 +37,7 @@ CARD_DIRS = [
 CANON_W = 480
 CANON_H = 672
 TOP_K = 3
-SHORTLIST_K = 18
+SHORTLIST_K = 12
 
 REFERENCE_DB: list[dict[str, Any]] = []
 
@@ -257,8 +257,8 @@ def score_full(cand, ref):
 
     return (
         s_strip * 0.28
-        + s_title * 0.30
-        + s_stats * 0.18
+        + s_title * 0.38
+        + s_stats * 0.10
         + s_art * 0.14
         + s_global * 0.10
     )
