@@ -416,13 +416,54 @@ def predict_card(candidate_raw: np.ndarray) -> dict[str, Any]:
         cv2.rotate(candidate, cv2.ROTATE_180),
     ]
 
-    all_scores: dict[str, float] = {}
-    debug_zone_scores: dict[str, dict[str, float]] = {}
+    stage1_pool: dict[str, float] = {}
 
+    # ⚡ Stage 1: global + art + title quick shortlist
     for variant in variants:
         cand = build_candidate_features(variant)
 
         for ref in REFERENCE_DB:
+            s_title = blended_text_score(
+                cand["title_g"],
+                ref["title_g"],
+                cand["title_b"],
+                ref["title_b"],
+            )
+            s_art = corr_score(cand["art_g"], ref["art_g"])
+            s_global = corr_score(cand["global_g"], ref["global_g"])
+
+            fast_score = (
+                s_title * 0.45 +
+                s_art * 0.30 +
+                s_global * 0.25
+            )
+
+            card_no = ref["cardNo"]
+
+            if card_no not in stage1_pool or fast_score > stage1_pool[card_no]:
+                stage1_pool[card_no] = fast_score
+
+    shortlist = sorted(
+        stage1_pool.items(),
+        key=lambda x: x[1],
+        reverse=True
+    )[:24]
+
+    shortlist_ids = {card_no for card_no, _ in shortlist}
+
+    # 🎯 Stage 2: full voting only shortlist
+    all_scores: dict[str, float] = {}
+    debug_zone_scores: dict[str, dict[str, float]] = {}
+
+    shortlist_refs = [
+        ref for ref in REFERENCE_DB
+        if ref["cardNo"] in shortlist_ids
+    ]
+
+    for variant in variants:
+        cand = build_candidate_features(variant)
+
+        for ref in shortlist_refs:
             scores = score_against_reference(cand, ref)
             card_no = ref["cardNo"]
 
@@ -444,7 +485,7 @@ def predict_card(candidate_raw: np.ndarray) -> dict[str, Any]:
     second_score = top3[1][1] if len(top3) > 1 else -1.0
     margin = max(0.0, best_score - second_score)
 
-    confidence = min(0.99, max(0.55, 0.78 + (margin * 1.5)))
+    confidence = min(0.99, max(0.60, 0.80 + (margin * 1.8)))
 
     best_debug = debug_zone_scores.get(best_card_no, {})
 
