@@ -37,7 +37,7 @@ CARD_DIRS = [
 CANON_W = 480
 CANON_H = 672
 TOP_K = 3
-SHORTLIST_K = 12
+SHORTLIST_K = 8
 
 REFERENCE_DB: list[dict[str, Any]] = []
 
@@ -258,8 +258,8 @@ def score_full(cand, ref):
     return (
         s_strip * 0.28
         + s_title * 0.38
-        + s_stats * 0.10
-        + s_art * 0.14
+        + s_stats * 0.16
+        + s_art * 0.08
         + s_global * 0.10
     )
 
@@ -277,10 +277,17 @@ def predict_card(candidate_raw: np.ndarray):
     stage1 = []
     for ref in REFERENCE_DB:
         fast = (
-            blended_text_score(cand["title_g"], ref["title_g"], cand["title_b"], ref["title_b"]) * 0.5
-            + corr_score(cand["art_g"], ref["art_g"]) * 0.3
-            + corr_score(cand["global_g"], ref["global_g"]) * 0.2
-        )
+    blended_text_score(
+        cand["strip_g"], ref["strip_g"],
+        cand["strip_b"], ref["strip_b"]
+    ) * 0.40
+    + blended_text_score(
+        cand["title_g"], ref["title_g"],
+        cand["title_b"], ref["title_b"]
+    ) * 0.35
+    + corr_score(cand["art_g"], ref["art_g"]) * 0.15
+    + corr_score(cand["global_g"], ref["global_g"]) * 0.10
+)
         stage1.append((ref, fast))
 
     shortlist = sorted(stage1, key=lambda x: x[1], reverse=True)[:SHORTLIST_K]
