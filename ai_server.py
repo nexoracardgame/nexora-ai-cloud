@@ -78,14 +78,15 @@ def enhance_mobile_capture(image: np.ndarray) -> np.ndarray:
 
 def preprocess_card(image: np.ndarray) -> np.ndarray:
     image = enhance_mobile_capture(image)
+    image = warp_card(image)
     return cv2.resize(image, (CANON_W, CANON_H))
 
 
 def crop_right_number_strip(image: np.ndarray) -> np.ndarray:
     h, w = image.shape[:2]
-    strip = image[int(h * 0.10):int(h * 0.84), int(w * 0.82):int(w * 0.99)]
+    strip = image[int(h * 0.08):int(h * 0.86), int(w * 0.79):int(w * 0.995)]
     strip = cv2.rotate(strip, cv2.ROTATE_90_COUNTERCLOCKWISE)
-    return safe_resize(strip, (240, 76))
+    return safe_resize(strip, (260, 88))
 
 
 def crop_top_title(image: np.ndarray) -> np.ndarray:
@@ -121,6 +122,9 @@ def normalize_binary_text(image: np.ndarray) -> np.ndarray:
         255,
         cv2.THRESH_BINARY + cv2.THRESH_OTSU,
     )
+
+    # เพิ่มความหนาเลข
+    th = cv2.dilate(th, np.ones((2, 2), np.uint8), iterations=1)
 
     return th.astype(np.float32) / 255.0
 
