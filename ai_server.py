@@ -244,7 +244,7 @@ def normalize_gray(image: np.ndarray) -> np.ndarray:
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     gray = cv2.equalizeHist(gray)
     gray = cv2.GaussianBlur(gray, (3, 3), 0)
-    return gray.astype(np.float32) / 255.0
+    return (gray.astype(np.float16) / 255.0)
 
 
 def normalize_binary_text(image: np.ndarray) -> np.ndarray:
@@ -416,10 +416,9 @@ def predict_card(candidate_raw: np.ndarray) -> dict[str, Any]:
 
     candidate = preprocess_card(candidate_raw)
 
-    variants = [
+    variants = [candidate]
         candidate,
         cv2.rotate(candidate, cv2.ROTATE_180),
-    ]
 
     stage1_pool: dict[str, float] = {}
 
