@@ -28,8 +28,9 @@ app.add_middleware(
 # =========================
 BASE_DIR = Path(__file__).resolve().parent
 CARD_DIRS = [
-    BASE_DIR / "public" / "cards",
     BASE_DIR / "cards",
+    BASE_DIR / "public" / "cards",
+    BASE_DIR / "assets" / "cards",
 ]
 
 CANON_W = 480
@@ -275,6 +276,10 @@ def extract_card_no_from_filename(path: Path) -> str | None:
 # =========================
 # REFERENCE DB
 # =========================
+print("BASE_DIR =", BASE_DIR)
+for d in CARD_DIRS:
+    print("CHECK DIR =", d, d.exists())
+    
 def build_reference_db() -> list[dict[str, Any]]:
     refs: list[dict[str, Any]] = []
 
